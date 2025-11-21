@@ -9,77 +9,74 @@ class GameAssets {
     static let pieceHeight: Float = 0.02   // 2cm de altura
     static let boardSize: Int = 8
     
-    // --- NOVO: Tornamos as malhas (Mesh) estáticas e reutilizáveis ---
+    // --- Malhas Estáticas (Reutilizáveis) ---
     static let pieceMesh = MeshResource.generateCylinder(height: pieceHeight, radius: pieceRadius)
     static let squareMesh = MeshResource.generateBox(width: squareSize, height: 0.01, depth: squareSize) // Tabuleiro fino
+    
+    // --- MATERIAIS ESTÁTICOS (Correção do Erro) ---
+    // Agora eles são 'static let' para serem acessados pelo ARViewContainer
+    
+    // Materiais do Tabuleiro
+    static let whiteMat = SimpleMaterial(color: .white, roughness: 0.8, isMetallic: false)
+    static let blackMat = SimpleMaterial(color: .black, roughness: 0.8, isMetallic: false)
+    
+    // Materiais das Peças
+    static let redPieceMat = SimpleMaterial(color: .red, roughness: 0.3, isMetallic: false)
+    static let blackPieceMat = SimpleMaterial(color: .darkGray, roughness: 0.3, isMetallic: false)
+    
+    // Materiais de Destaque (Amarelo e Verde)
+    static let highlightPieceMat = SimpleMaterial(color: .yellow, roughness: 0.1, isMetallic: true)
+    static let highlightSquareMat = SimpleMaterial(color: .green, roughness: 0.8, isMetallic: false)
+    
     
     // Função principal que constrói e retorna o tabuleiro completo
     static func createCheckersBoard() -> ModelEntity {
         
-        // 1. Criar a entidade "raiz" que segura todas as peças
         let boardEntity = ModelEntity()
         
-        // 2. Definir materiais
-        let whiteMat = SimpleMaterial(color: .white, roughness: 0.8, isMetallic: false)
-        let blackMat = SimpleMaterial(color: .black, roughness: 0.8, isMetallic: false)
-        let redPieceMat = SimpleMaterial(color: .red, roughness: 0.3, isMetallic: false)
-        let blackPieceMat = SimpleMaterial(color: .darkGray, roughness: 0.3, isMetallic: false)
-        
-        // Para centralizar o tabuleiro, calculamos um offset
-        // Metade da largura total do tabuleiro, menos metade de um quadrado
+        // Offset para centralizar
         let offset = (Float(boardSize) * squareSize) / 2.0 - (squareSize / 2.0)
         
-        // 3. Loop 8x8 para criar as casas do tabuleiro
         for row in 0..<boardSize {
             for col in 0..<boardSize {
                 
                 let isBlackSquare = (row + col) % 2 == 1
-                let currentPosition = Position(row: row, col: col) // Posição atual
+                let currentPosition = Position(row: row, col: col)
                 
                 // --- A Casa (Square) ---
-                let square = ModelEntity(mesh: squareMesh, // Reutiliza a malha
+                // Usamos os materiais estáticos aqui
+                let square = ModelEntity(mesh: squareMesh,
                                          materials: [isBlackSquare ? blackMat : whiteMat])
                 
-                // --- LÓGICA DE POSIÇÃO CORRIGIDA ---
                 let xPos = (Float(col) * squareSize) - offset
                 let zPos = (Float(row) * squareSize) - offset
                 square.position = SIMD3<Float>(x: xPos, y: 0, z: zPos)
                 
-                // --- Adicionar "inteligência" à casa ---
                 square.components[BoardPositionComponent.self] = BoardPositionComponent(position: currentPosition)
                 square.generateCollisionShapes(recursive: false)
                 
-                boardEntity.addChild(square) // Adiciona a casa
+                boardEntity.addChild(square)
                 
                 // --- As Peças (Pieces) ---
                 if isBlackSquare {
                     var pieceMat: SimpleMaterial? = nil
                     
-                    // --- LÓGICA DE PEÇAS CORRIGIDA ---
-                    // Coloca as peças pretas (cinza-escuro) nas 3 primeiras fileiras
                     if row < 3 {
-                        pieceMat = blackPieceMat
-                    }
-                    // Coloca as peças vermelhas nas 3 últimas fileiras
-                    else if row > 4 {
-                        pieceMat = redPieceMat
+                        pieceMat = blackPieceMat // Usa o estático
+                    } else if row > 4 {
+                        pieceMat = redPieceMat   // Usa o estático
                     }
                     
-                    // Se um material foi definido, crie a peça
                     if let material = pieceMat {
-                        // Reutiliza a malha 'pieceMesh'
                         let piece = ModelEntity(mesh: pieceMesh, materials: [material])
                         
-                        // --- LÓGICA DE POSIÇÃO CORRIGIDA ---
-                        // Posição da peça (mesmo x, z da casa, mas mais alto em y)
                         let yPos = (0.01 / 2.0) + (pieceHeight / 2.0)
                         piece.position = SIMD3<Float>(x: xPos, y: yPos, z: zPos)
                         
-                        // --- Adicionar "inteligência" à peça ---
                         piece.components[BoardPositionComponent.self] = BoardPositionComponent(position: currentPosition)
                         piece.generateCollisionShapes(recursive: false)
                         
-                        boardEntity.addChild(piece) // Adiciona a peça
+                        boardEntity.addChild(piece)
                     }
                 }
             }

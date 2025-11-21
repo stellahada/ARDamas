@@ -1,14 +1,13 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import Combine // Importante para ouvir eventos de rede
 
 struct ARViewContainer: UIViewRepresentable {
     
-    // --- NOVO: Propriedade para receber o modelo ---
-    // O SwiftUI vai injetar o 'gameModel' do ContentView aqui.
     var gameModel: CheckersModel
+    var mpcService: MPCService // Recebe o serviço de multiplayer
     
-    // 1. makeUIView (modificado)
     func makeUIView(context: Context) -> ARView {
         
         let arView = ARView(frame: .zero)
@@ -23,199 +22,197 @@ struct ARViewContainer: UIViewRepresentable {
         ))
         
         context.coordinator.arView = arView
-        
-        // --- NOVO: Passar o modelo para o Coordinator ---
-        // Agora o Coordinator tem uma referência ao "cérebro" do jogo.
         context.coordinator.gameModel = gameModel
+        context.coordinator.mpcService = mpcService // Passa o serviço
+        
+        // Inicia a escuta de mensagens da rede
+        context.coordinator.setupBindings()
         
         return arView
     }
     
-    // 2. updateUIView (sem mudanças)
-    func updateUIView(_ uiView: ARView, context: Context) {
-        // Deixe em branco por agora
-    }
+    func updateUIView(_ uiView: ARView, context: Context) {}
     
-    // 3. makeCoordinator (sem mudanças)
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
     
-    // 4. Coordinator (modificado)
     class Coordinator: NSObject {
         
-        // --- NOVO: Propriedade para "segurar" o modelo ---
-        // (Usamos 'weak' para evitar "ciclos de retenção")
         weak var gameModel: CheckersModel?
-        var boardEntity: ModelEntity?
-        
+        weak var mpcService: MPCService? // Referência ao serviço
         weak var arView: ARView?
-        var boardIsPlaced = false
         
-        // --- NOVO: Variáveis para o fluxo dojogo ---
-        // Armazena a peça selecionada E seus movimentos válidos
+        var boardIsPlaced = false
+        var boardEntity: ModelEntity?
         var selection: (position: Position, validMoves: [Position])? = nil
+        var highlightedEntities: [ModelEntity] = []
+        
+        // Para gerenciar a assinatura do Combine
+        var cancellables = Set<AnyCancellable>()
+        
+        // --- FUNÇÃO NOVA: Configurar a Escuta de Rede ---
+        func setupBindings() {
+            guard let mpcService = mpcService else { return }
+            
+            // Ouve o canal 'messageReceived'
+            mpcService.messageReceived
+                .sink { [weak self] message in
+                    self?.handleNetworkMessage(message)
+                }
+                .store(in: &cancellables)
+        }
+        
+        // Lida com mensagens recebidas
+        func handleNetworkMessage(_ message: GameMessage) {
+            switch message.type {
+            case .gameMove:
+                // Decodifica o movimento
+                if let move = try? JSONDecoder().decode(GameMove.self, from: message.payload) {
+                    print("MPC: Movimento recebido do oponente: \(move.from) -> \(move.to)")
+                    
+                    // 1. Atualiza a Lógica Local
+                    // (O modelo já sabe de quem é o turno, então só executa)
+                    gameModel?.movePiece(from: move.from, to: move.to)
+                    
+                    // 2. Executa a Animação Visual
+                    animateMove(from: move.from, to: move.to)
+                    
+                    print("MPC: Tabuleiro sincronizado. Turno atual: \(gameModel?.currentPlayer ?? .red)")
+                }
+            }
+        }
         
         @objc func handleTap(_ sender: UITapGestureRecognizer) {
-            
-            guard let arView = arView else { return }
+            guard let arView = arView, let gameModel = gameModel else { return }
             let tapLocation = sender.location(in: arView)
             
-            // --- LÓGICA DE COLOCAR O TABULEIRO (Movida para uma função) ---
             if !boardIsPlaced {
                 placeBoard(at: tapLocation, in: arView)
-                return // Saia da função após tentar colocar o tabuleiro
-            }
-            
-            // --- NOVO: Garantir que o modelo existe antes de jogar ---
-            guard let gameModel = gameModel else {
-                print("Erro: Modelo do jogo não encontrado no Coordinator.")
                 return
             }
             
-            // --- LÓGICA NOVA DE JOGO (Interagir com o Tabuleiro) ---
             if let entity = arView.entity(at: tapLocation) {
-                
                 if let boardComponent = entity.components[BoardPositionComponent.self] {
                     let tappedPosition = boardComponent.position
                     
-                    // TENTAR SELECIONAR UMA PEÇA
-                    // (Verifica se tocamos numa entidade que é uma peça 3D)
+                    // SELECIONAR PEÇA
                     if let modelEntity = entity as? ModelEntity, modelEntity.model?.mesh === GameAssets.pieceMesh {
-                        
-                        // 1. Verificar se a peça é do jogador atual
                         let piece = gameModel.board[tappedPosition.row][tappedPosition.col]
+                        
                         if piece?.player == gameModel.currentPlayer {
-                            
-                            // 2. Pedir os movimentos válidos ao "Cérebro"
+                            removeHighlights()
                             let validMoves = gameModel.getValidMoves(from: tappedPosition)
-                            
-                            print(">>> PEÇA SELECIONADA: \(tappedPosition)")
-                            print(">>> TURNO DO JOGADOR: \(gameModel.currentPlayer)")
-                            print(">>> MOVIMENTOS VÁLIDOS (Lógica): \(validMoves)")
-                            
-                            // 3. Armazenar a seleção
                             self.selection = (position: tappedPosition, validMoves: validMoves)
-                            
-                            // TODO: Destacar a peça e os movimentos válidos
-                            
-                        } else {
-                            print(">>> Peça do oponente! (Turno de \(gameModel.currentPlayer))")
+                            highlightSelection(piece: modelEntity, moves: validMoves)
                         }
                         
-                        // TENTAR MOVER A PEÇA SELECIONADA
-                        // (O toque NÃO foi numa peça, então deve ser numa casa...
-                        // E já tínhamos uma peça selecionada?)
+                    // MOVER PEÇA
                     } else if let selection = self.selection {
-                        
                         let fromPosition = selection.position
                         
                         if selection.validMoves.contains(tappedPosition) {
+                            let toPosition = tappedPosition
                             
-                            let toPosition = tappedPosition // Apenas para clareza
-                            
-                            print(">>> TENTANDO MOVER: \(fromPosition) -> \(toPosition)")
-                            
-                            // 1. Avisar o "Cérebro" para mover a peça
+                            // 1. Mover Localmente
                             gameModel.movePiece(from: fromPosition, to: toPosition)
-                            
-                            // 2. Limpar a seleção
                             self.selection = nil
                             
-                            // --- NOVO: PREENCHER O TODO DA ANIMAÇÃO ---
+                            // 2. Animar Localmente
+                            animateMove(from: fromPosition, to: toPosition)
                             
-                            // 3. Encontrar as entidades 3D correspondentes
-                            guard let pieceEntity = findEntity(at: fromPosition, for: GameAssets.pieceMesh),
-                                  let targetSquareEntity = findEntity(at: toPosition, for: GameAssets.squareMesh)
-                            else {
-                                print("Erro de Animação: Não foi possível encontrar a peça ou a casa 3D.")
-                                return
-                            }
+                            // 3. ENVIAR PARA A REDE!
+                            mpcService?.sendMove(from: fromPosition, to: toPosition)
                             
-                            // 4. Calcular a nova posição 3D
-                            // A peça deve ficar "em cima" da casa de destino.
-                            
-                            // Posição (x, z) da casa de destino
-                            let targetPos3D = targetSquareEntity.position
-                            
-                            // Altura (y) da peça (metade da casa + metade da peça)
-                            let yPos = (0.01 / 2.0) + (GameAssets.pieceHeight / 2.0)
-                            
-                            // Criar a nova 'transform' (posição) para a peça
-                            var newTransform = targetSquareEntity.transform
-                            newTransform.translation = SIMD3<Float>(x: targetPos3D.x, y: yPos, z: targetPos3D.z)
-                            
-                            // 5. Executar a animação!
-                            // Move a peça 'relativeTo: boardEntity' para garantir que as
-                            // coordenadas (newTransform) estão corretas dentro do sistema do tabuleiro.
-                            pieceEntity.move(to: newTransform, relativeTo: boardEntity, duration: 0.4, timingFunction: .easeInOut)
-                            
-                            // 6. Atualizar a "etiqueta" da peça!
-                            // A peça 3D está agora numa nova 'Position'.
-                            // Temos de atualizar o seu 'BoardPositionComponent' para corresponder.
-                            pieceEntity.components[BoardPositionComponent.self] = BoardPositionComponent(position: toPosition)
-                            
-                            // TODO: Remover o destaque
-                            
-                            print(">>> PEÇA MOVIDA (com animação)! Próximo turno: \(gameModel.currentPlayer)")
-                            
+                            removeHighlights()
                         } else {
-                            // O usuário tocou em uma casa vazia sem ter uma peça selecionada
-                            print(">>> TOQUE em uma CASA VAZIA: \(tappedPosition)")
+                            self.selection = nil
+                            removeHighlights()
                         }
+                    } else {
+                        self.selection = nil
+                        removeHighlights()
                     }
-                }
-            } // Fim de handleTap
-            
-            // --- NOVA FUNÇÃO AJUDANTE (Lógica antiga movida para cá) ---
-            func placeBoard(at tapLocation: CGPoint, in arView: ARView) {
-                let results = arView.raycast(from: tapLocation, allowing: .estimatedPlane, alignment: .horizontal)
-                
-                if let firstResult = results.first {
-                    let anchor = AnchorEntity(world: firstResult.worldTransform)
-                    
-                    // --- CORREÇÃO DO ERRO DE DIGITAÇÃO ---
-                    // O nome correto da função é 'createCheckersBoard'
-                    let boardEntity = GameAssets.createCheckersBoard()
-                    self.boardEntity = boardEntity
-                    
-                    anchor.addChild(boardEntity)
-                    arView.scene.addAnchor(anchor)
-                    
-                    self.boardIsPlaced = true
-                    print(">>> Tabuleiro colocado com sucesso!")
                 }
             }
+        }
+        
+        // --- FUNÇÃO REFATORADA: Animação ---
+        // Extraímos isto para ser usado tanto pelo Tap quanto pela Rede
+        func animateMove(from: Position, to: Position) {
+            guard let pieceEntity = findEntity(at: from, for: GameAssets.pieceMesh),
+                  let targetSquareEntity = findEntity(at: to, for: GameAssets.squareMesh)
+            else { return }
             
-            func findEntity(at position: Position, for mesh: MeshResource) -> ModelEntity? {
-                
-                // 1. Garantir que o tabuleiro 3D existe
-                guard let boardEntity = self.boardEntity else { return nil }
-                
-                // 2. Procurar em todos os "filhos" do tabuleiro
-                // (As 64 casas e as 24 peças)
-                for entity in boardEntity.children {
-                    
-                    // 3. Verificar se é uma ModelEntity e se a malha 3D é a que procuramos
-                    //    (Isto é mais rápido do que verificar o componente primeiro)
-                    guard let modelEntity = entity as? ModelEntity,
-                          modelEntity.model?.mesh === mesh
-                    else {
-                        continue // Próximo, este não é (ex: é uma peça, mas procuramos uma casa)
-                    }
-                    
-                    // 4. Verificar se a "etiqueta" de Posição corresponde
-                    if let component = entity.components[BoardPositionComponent.self],
-                       component.position == position {
-                        
-                        // 5. Encontrado!
-                        return modelEntity
-                    }
-                }
-                
-                // Não foi encontrado
-                return nil
+            let targetPos3D = targetSquareEntity.position
+            let yPos = (0.01 / 2.0) + (GameAssets.pieceHeight / 2.0)
+            
+            var newTransform = targetSquareEntity.transform
+            newTransform.translation = SIMD3<Float>(x: targetPos3D.x, y: yPos, z: targetPos3D.z)
+            
+            pieceEntity.move(to: newTransform, relativeTo: boardEntity, duration: 0.4, timingFunction: .easeInOut)
+            
+            // Atualiza a posição lógica da entidade 3D
+            pieceEntity.components[BoardPositionComponent.self] = BoardPositionComponent(position: to)
+        }
+        
+        // --- FUNÇÕES AUXILIARES (placeBoard, findEntity, highlight...) ---
+        // (Mantenha as funções auxiliares exatamente como estavam no código anterior)
+        
+        func placeBoard(at tapLocation: CGPoint, in arView: ARView) {
+            let results = arView.raycast(from: tapLocation, allowing: .estimatedPlane, alignment: .horizontal)
+            if let firstResult = results.first {
+                let anchor = AnchorEntity(world: firstResult.worldTransform)
+                let boardEntity = GameAssets.createCheckersBoard()
+                self.boardEntity = boardEntity
+                anchor.addChild(boardEntity)
+                arView.scene.addAnchor(anchor)
+                self.boardIsPlaced = true
             }
-        } // Fim de Coordinator
-    } // Fim de ARViewContainer
+        }
+        
+        func findEntity(at position: Position, for mesh: MeshResource) -> ModelEntity? {
+            guard let boardEntity = self.boardEntity else { return nil }
+            for entity in boardEntity.children {
+                guard let modelEntity = entity as? ModelEntity,
+                      modelEntity.model?.mesh === mesh
+                else { continue }
+                if let component = entity.components[BoardPositionComponent.self],
+                   component.position == position {
+                    return modelEntity
+                }
+            }
+            return nil
+        }
+        
+        func highlightSelection(piece: ModelEntity, moves: [Position]) {
+            piece.model?.materials = [GameAssets.highlightPieceMat]
+            highlightedEntities.append(piece)
+            for pos in moves {
+                if let squareEntity = findEntity(at: pos, for: GameAssets.squareMesh) {
+                    squareEntity.model?.materials = [GameAssets.highlightSquareMat]
+                    highlightedEntities.append(squareEntity)
+                }
+            }
+        }
+        
+        func removeHighlights() {
+            guard let gameModel = gameModel else { return }
+            for entity in highlightedEntities {
+                guard let component = entity.components[BoardPositionComponent.self] else { continue }
+                let pos = component.position
+                if entity.model?.mesh === GameAssets.pieceMesh {
+                    if let pieceType = gameModel.board[pos.row][pos.col] {
+                        let originalMat = (pieceType.player == .red) ? GameAssets.redPieceMat : GameAssets.blackPieceMat
+                        entity.model?.materials = [originalMat]
+                    }
+                } else if entity.model?.mesh === GameAssets.squareMesh {
+                    let isBlackSquare = (pos.row + pos.col) % 2 == 1
+                    let originalMat = isBlackSquare ? GameAssets.blackMat : GameAssets.whiteMat
+                    entity.model?.materials = [originalMat]
+                }
+            }
+            highlightedEntities.removeAll()
+        }
+    }
 }
