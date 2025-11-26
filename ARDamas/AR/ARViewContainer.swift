@@ -14,20 +14,17 @@ struct ARViewContainer: UIViewRepresentable {
         config.planeDetection = [.horizontal]
         arView.session.run(config)
         
-        arView.addGestureRecognizer(UITapGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleTap)
-        ))
+        // Gestos
+        arView.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap)))
+        arView.addGestureRecognizer(UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch)))
+        arView.addGestureRecognizer(UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan)))
         
         context.coordinator.arView = arView
         context.coordinator.gameModel = gameModel
         context.coordinator.mpcService = mpcService
         context.coordinator.setupBindings()
         
-        // Ouvintes de Notificações da UI
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.onShareMapRequest), name: NSNotification.Name("ShareMap"), object: nil)
-        
-        // --- CORREÇÃO: Ouvir o pedido de reinício local ---
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.onLocalRestart), name: NSNotification.Name("LocalRestart"), object: nil)
         
         return arView
@@ -48,8 +45,12 @@ struct ARViewContainer: UIViewRepresentable {
         var boardIsPlaced = false
         var boardEntity: ModelEntity?
         var selection: (position: Position, validMoves: [Position])? = nil
-        var highlightedEntities: [ModelEntity] = []
+        
+        // --- CORREÇÃO AQUI: Usamos RealityKit.Material explicitamente ---
+        var savedMaterials: [ModelEntity: [RealityKit.Material]] = [:]
+        
         var cancellables = Set<AnyCancellable>()
+        var lastScale: SIMD3<Float> = SIMD3<Float>(1, 1, 1)
         
         func setupBindings() {
             guard let mpcService = mpcService else { return }
@@ -71,12 +72,33 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
         
-        // --- CORREÇÃO: Ação chamada quando você clica em "Jogar Novamente" ---
         @objc func onLocalRestart() {
-            print("AR: Reiniciando tabuleiro localmente...")
             resetBoardVisuals()
         }
         
+        // --- GESTOS ---
+        @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
+            guard let board = boardEntity else { return }
+            if sender.state == .began { lastScale = board.scale }
+            else if sender.state == .changed {
+                let newScale = Float(sender.scale)
+                board.scale = lastScale * max(0.1, min(5.0, newScale))
+            }
+        }
+        
+        @objc func handlePan(_ sender: UIPanGestureRecognizer) {
+            guard let arView = arView, let board = boardEntity, boardIsPlaced else { return }
+            let location = sender.location(in: arView)
+            if sender.state == .changed {
+                let results = arView.raycast(from: location, allowing: .estimatedPlane, alignment: .horizontal)
+                if let firstResult = results.first {
+                    let worldTransform = firstResult.worldTransform
+                    let worldPosition = SIMD3<Float>(worldTransform.columns.3.x, worldTransform.columns.3.y, worldTransform.columns.3.z)
+                    board.setPosition(worldPosition, relativeTo: nil)
+                }
+            }
+        }
+
         func handleNetworkMessage(_ message: GameMessage) {
             switch message.type {
             case .gameMove:
@@ -95,28 +117,32 @@ struct ARViewContainer: UIViewRepresentable {
                         self.boardIsPlaced = true
                     }
                 } catch { print("MPC: Erro mapa: \(error)") }
-                
             case .gameRestart:
-                print("MPC: Pedido de reinício recebido.")
                 gameModel?.resetGame()
                 resetBoardVisuals()
             }
         }
         
+        func orientBoard() {
+            guard let board = boardEntity, let model = gameModel else { return }
+            if model.localPlayerColor == .black {
+                board.orientation = simd_quatf(angle: .pi, axis: [0, 1, 0])
+            } else {
+                board.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+            }
+        }
+        
         func resetBoardVisuals() {
-            // Remove o tabuleiro atual
             boardEntity?.removeFromParent()
             boardEntity = nil
             selection = nil
             removeHighlights()
-            
-            // Recria o tabuleiro no mesmo lugar (se a âncora ainda existir)
             if let anchor = arView?.scene.anchors.first(where: { $0.name == "CheckersBoardAnchor" }) {
                 let newBoard = GameAssets.createCheckersBoard()
                 self.boardEntity = newBoard
                 anchor.addChild(newBoard)
+                orientBoard()
             } else {
-                // Se não achar âncora, força o usuário a colocar de novo
                 boardIsPlaced = false
             }
         }
@@ -129,8 +155,6 @@ struct ARViewContainer: UIViewRepresentable {
                 placeBoard(at: tapLocation, in: arView)
                 return
             }
-            
-            // Impede movimentos se o jogo acabou
             if gameModel.winner != nil { return }
             
             if let entity = arView.entity(at: tapLocation) {
@@ -139,58 +163,133 @@ struct ARViewContainer: UIViewRepresentable {
                     
                     if let modelEntity = entity as? ModelEntity, modelEntity.model?.mesh === GameAssets.pieceMesh {
                         let piece = gameModel.board[tappedPosition.row][tappedPosition.col]
-                        if piece?.player == gameModel.currentPlayer {
+                        let isMyTurn = (piece?.player == gameModel.currentPlayer)
+                        let isMyPiece = (piece?.player == gameModel.localPlayerColor)
+                        
+                        if let requiredPos = gameModel.mustCaptureFrom {
+                            if tappedPosition != requiredPos { return }
+                        }
+                        
+                        if isMyTurn && isMyPiece {
                             removeHighlights()
                             let validMoves = gameModel.getValidMoves(from: tappedPosition)
                             self.selection = (position: tappedPosition, validMoves: validMoves)
                             highlightSelection(piece: modelEntity, moves: validMoves)
                         }
-                    } else if let selection = self.selection {
+                        
+                    } 
+                    else if let selection = self.selection {
                         if selection.validMoves.contains(tappedPosition) {
                             let fromPos = selection.position
                             let toPos = tappedPosition
+                            
+                            removeHighlights()
+                            
                             let result = gameModel.movePiece(from: fromPos, to: toPos)
+                            
                             self.selection = nil
+                            
                             animateMove(from: fromPos, to: toPos, result: result)
                             mpcService?.sendMove(from: fromPos, to: toPos)
-                            removeHighlights()
+                            
+                            if !result.turnChanged {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                                    self?.autoSelectForCombo(at: toPos)
+                                }
+                            }
+                            
                         } else {
+                            if gameModel.mustCaptureFrom == nil {
+                                self.selection = nil
+                                removeHighlights()
+                            }
+                        }
+                    } else {
+                        if gameModel.mustCaptureFrom == nil {
                             self.selection = nil
                             removeHighlights()
                         }
-                    } else {
-                        self.selection = nil
-                        removeHighlights()
                     }
                 }
             }
         }
         
-        func animateMove(from: Position, to: Position, result: MoveResult) {
-            guard let pieceEntity = findEntity(at: from, for: GameAssets.pieceMesh),
-                  let targetSquareEntity = findEntity(at: to, for: GameAssets.squareMesh)
-            else { return }
+        func autoSelectForCombo(at position: Position) {
+            guard let gameModel = gameModel else { return }
+            guard let pieceEntity = findEntity(at: position, for: GameAssets.pieceMesh) else { return }
             
-            let targetPos3D = targetSquareEntity.position
-            let yPos = (0.01 / 2.0) + (GameAssets.pieceHeight / 2.0)
-            var newTransform = targetSquareEntity.transform
-            newTransform.translation = SIMD3<Float>(x: targetPos3D.x, y: yPos, z: targetPos3D.z)
+            let validMoves = gameModel.getValidMoves(from: position)
             
-            pieceEntity.move(to: newTransform, relativeTo: boardEntity, duration: 0.4, timingFunction: .easeInOut)
-            pieceEntity.components[BoardPositionComponent.self] = BoardPositionComponent(position: to)
-            
-            if let capturedPos = result.capturedPosition {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    self.performVisualCapture(at: capturedPos)
-                }
-            }
-            if result.isPromotion {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    self.performVisualPromotion(on: pieceEntity)
-                }
+            if !validMoves.isEmpty {
+                self.selection = (position: position, validMoves: validMoves)
+                highlightSelection(piece: pieceEntity, moves: validMoves)
             }
         }
         
+        func animateMove(from: Position, to: Position, result: MoveResult) {
+                    guard let pieceEntity = findEntity(at: from, for: GameAssets.pieceMesh),
+                          let targetSquareEntity = findEntity(at: to, for: GameAssets.squareMesh)
+                    else { return }
+                    
+                    // Toca som e vibração
+                    if result.capturedPosition != nil {
+                        AudioManager.shared.playSound("capture") // Certifique-se de ter o arquivo
+                        AudioManager.shared.hapticSuccess()
+                    } else {
+                        AudioManager.shared.playSound("move") // Certifique-se de ter o arquivo
+                        AudioManager.shared.hapticTap()
+                    }
+                    
+                    // Cálculos de Posição
+                    let startPos = pieceEntity.position(relativeTo: boardEntity)
+                    let targetPos3D = targetSquareEntity.position
+                    let endY = (0.01 / 2.0) + (GameAssets.pieceHeight / 2.0)
+                    let endPos = SIMD3<Float>(x: targetPos3D.x, y: endY, z: targetPos3D.z)
+                    
+                    // Ponto médio (Pico do pulo)
+                    let midX = (startPos.x + endPos.x) / 2
+                    let midZ = (startPos.z + endPos.z) / 2
+                    let jumpHeight: Float = 0.07 // Altura do pulo (15cm)
+                    let midPos = SIMD3<Float>(x: midX, y: jumpHeight, z: midZ)
+                    
+                    // Criar animação de Pulo (Subir -> Descer)
+                    // RealityKit nativo não tem curva de bezier fácil, então fazemos sequencial:
+                    // Movemos para o meio (alto) e depois para o fim (baixo)
+                    
+                    let duration = 0.5
+                    
+                    // 1. Configura a Transformação do Pico
+                    var midTransform = pieceEntity.transform
+                    midTransform.translation = midPos
+                    
+                    // 2. Configura a Transformação Final
+                    var endTransform = pieceEntity.transform
+                    endTransform.translation = endPos
+                    
+                    // Mover para cima (metade do tempo)
+                    pieceEntity.move(to: midTransform, relativeTo: boardEntity, duration: duration / 2, timingFunction: .easeOut)
+                    
+                    // Agendar a descida
+                    DispatchQueue.main.asyncAfter(deadline: .now() + (duration / 2)) {
+                        pieceEntity.move(to: endTransform, relativeTo: self.boardEntity, duration: duration / 2, timingFunction: .easeIn)
+                    }
+                    
+                    // Atualiza componente lógico
+                    pieceEntity.components[BoardPositionComponent.self] = BoardPositionComponent(position: to)
+                    
+                    // Efeitos de Captura e Promoção
+                    if let capturedPos = result.capturedPosition {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { // Delay para sincronizar com a aterrissagem
+                            self.performVisualCapture(at: capturedPos)
+                        }
+                    }
+                    if result.isPromotion {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+                            AudioManager.shared.playSound("king")
+                            self.performVisualPromotion(on: pieceEntity)
+                        }
+                    }
+                }        
         func performVisualCapture(at position: Position) {
             if let capturedEntity = findEntity(at: position, for: GameAssets.pieceMesh) {
                 var shrinkTransform = capturedEntity.transform
@@ -215,6 +314,7 @@ struct ARViewContainer: UIViewRepresentable {
                 self.boardEntity = boardEntity
                 anchor.addChild(boardEntity)
                 arView.scene.addAnchor(anchor)
+                orientBoard()
                 self.boardIsPlaced = true
             }
         }
@@ -240,37 +340,27 @@ struct ARViewContainer: UIViewRepresentable {
         }
         
         func highlightSelection(piece: ModelEntity, moves: [Position]) {
+            // Salva material original (RealityKit.Material)
+            if let currentMats = piece.model?.materials {
+                savedMaterials[piece] = currentMats
+            }
             piece.model?.materials = [GameAssets.highlightPieceMat]
-            highlightedEntities.append(piece)
+            
             for pos in moves {
                 if let squareEntity = findEntity(at: pos, for: GameAssets.squareMesh) {
+                    if let currentMats = squareEntity.model?.materials {
+                        savedMaterials[squareEntity] = currentMats
+                    }
                     squareEntity.model?.materials = [GameAssets.highlightSquareMat]
-                    highlightedEntities.append(squareEntity)
                 }
             }
         }
         
         func removeHighlights() {
-            guard let gameModel = gameModel else { return }
-            for entity in highlightedEntities {
-                guard let component = entity.components[BoardPositionComponent.self] else { continue }
-                let pos = component.position
-                if entity.model?.mesh === GameAssets.pieceMesh {
-                    if let pieceType = gameModel.board[pos.row][pos.col] {
-                        let originalMat = (pieceType.player == .red) ? GameAssets.redPieceMat : GameAssets.blackPieceMat
-                        entity.model?.materials = [originalMat]
-                    }
-                } else if entity.model?.mesh === GameAssets.squareMesh {
-                    let isBlackSquare = (pos.row + pos.col) % 2 == 1
-                    let originalMat = isBlackSquare ? GameAssets.blackMat : GameAssets.whiteMat
-                    entity.model?.materials = [originalMat]
-                }
+            for (entity, mats) in savedMaterials {
+                entity.model?.materials = mats
             }
-            highlightedEntities.removeAll()
-        }
-        
-        func forceReset() {
-             resetBoardVisuals()
+            savedMaterials.removeAll()
         }
     }
 }

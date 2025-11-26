@@ -13,7 +13,8 @@ struct ContentView: View {
                 GameView(gameModel: gameModel, mpcService: mpcService, isInGame: $isInGame)
                     .transition(.move(edge: .trailing))
             } else {
-                LobbyView(mpcService: mpcService, username: $username, onStart: {
+                // Passa gameModel para o Lobby
+                LobbyView(mpcService: mpcService, gameModel: gameModel, username: $username, onStart: {
                     withAnimation { isInGame = true }
                 })
                 .transition(.move(edge: .leading))
@@ -25,6 +26,7 @@ struct ContentView: View {
 
 struct LobbyView: View {
     @ObservedObject var mpcService: MPCService
+    @ObservedObject var gameModel: CheckersModel // Recebe o modelo
     @Binding var username: String
     var onStart: () -> Void
     @State private var nameSaved = false
@@ -53,6 +55,18 @@ struct LobbyView: View {
                     }
                 }.padding(.horizontal, 40)
                 
+                // --- NOVO: Seletor de Cor ---
+                VStack(alignment: .leading) {
+                    Text("ESCOLHA SEU LADO").font(.caption).fontWeight(.bold).foregroundColor(.white.opacity(0.6))
+                    Picker("Cor", selection: $gameModel.localPlayerColor) {
+                        Text("Vermelho").tag(Player.red)
+                        Text("Preto").tag(Player.black)
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    .background(Color.white.opacity(0.5))
+                    .cornerRadius(8)
+                }.padding(.horizontal, 40)
+                
                 VStack(alignment: .leading) {
                     HStack {
                         Text("JOGADORES").font(.caption).fontWeight(.bold).foregroundColor(.white.opacity(0.6))
@@ -72,7 +86,7 @@ struct LobbyView: View {
                                 }.padding().background(Color.white.opacity(0.15)).cornerRadius(10)
                             }
                         }
-                    }.frame(height: 150)
+                    }.frame(height: 100)
                 }.padding(.horizontal, 40)
                 
                 Spacer()
@@ -84,7 +98,6 @@ struct LobbyView: View {
     }
 }
 
-// MARK: - GAME VIEW
 struct GameView: View {
     @ObservedObject var gameModel: CheckersModel
     @ObservedObject var mpcService: MPCService
@@ -92,7 +105,6 @@ struct GameView: View {
     
     var opponentName: String { mpcService.connectedPeers.first?.displayName ?? "Oponente" }
     
-    // Para identificar quem ganhou visualmente
     var winnerName: String {
         guard let w = gameModel.winner else { return "" }
         return w == .red ? "VERMELHO" : "PRETO"
@@ -108,7 +120,6 @@ struct GameView: View {
             ARViewContainer(gameModel: gameModel, mpcService: mpcService).edgesIgnoringSafeArea(.all)
             
             VStack {
-                // HUD
                 HStack {
                     Button(action: { withAnimation { isInGame = false } }) {
                         Image(systemName: "xmark.circle.fill").font(.title).foregroundColor(.white).shadow(radius: 2)
@@ -116,6 +127,10 @@ struct GameView: View {
                     Spacer()
                     VStack(spacing: 2) {
                         Text("Vs \(opponentName)").font(.caption).fontWeight(.bold).foregroundColor(.white)
+                        // Mostra qual cor você é
+                        Text("Você: \(gameModel.localPlayerColor == .red ? "Vermelho" : "Preto")")
+                            .font(.caption2).bold().foregroundColor(gameModel.localPlayerColor == .red ? .red : .black)
+                            .padding(4).background(Color.white.opacity(0.8)).cornerRadius(4)
                         Text("Turno: \(gameModel.currentPlayer == .red ? "Vermelho" : "Preto")").font(.system(.body, design: .rounded)).fontWeight(.bold).foregroundColor(gameModel.currentPlayer == .red ? .red : .black)
                     }.padding(.vertical, 8).padding(.horizontal, 16).background(Material.ultraThinMaterial).cornerRadius(20)
                     Spacer()
@@ -123,56 +138,25 @@ struct GameView: View {
                 }.padding(.top, 50).padding(.horizontal)
                 
                 Spacer()
-                
             }
             
-            // --- TELA DE FIM DE JOGO ---
             if gameModel.winner != nil {
                 Color.black.opacity(0.6).edgesIgnoringSafeArea(.all)
-                
                 VStack(spacing: 20) {
                     Text("FIM DE JOGO!")
                         .font(.largeTitle).fontWeight(.heavy).foregroundColor(.white)
-                    
                     VStack {
-                        Text("VENCEDOR")
-                            .font(.caption).fontWeight(.bold).foregroundColor(.white.opacity(0.7))
-                        Text(winnerName)
-                            .font(.system(size: 40, weight: .bold, design: .rounded))
-                            .foregroundColor(winnerColor)
-                            .padding()
-                            .background(Color.white)
-                            .cornerRadius(15)
+                        Text("VENCEDOR").font(.caption).fontWeight(.bold).foregroundColor(.white.opacity(0.7))
+                        Text(winnerName).font(.system(size: 40, weight: .bold, design: .rounded)).foregroundColor(winnerColor).padding().background(Color.white).cornerRadius(15)
                     }
-                    
                     Button(action: {
-                        // 1. Reseta localmente
                         gameModel.resetGame()
-                        // 2. Reseta o tabuleiro 3D localmente (via Notification ou Observable, mas aqui vamos forçar via MPC)
-                        // Para simplificar, o ARViewContainer ouve o model resetado, mas precisamos enviar para o outro jogador
                         mpcService.sendRestart()
-                        
-                        // Nota: Precisamos forçar o ARViewContainer a limpar as peças.
-                        // Enviar .gameRestart para MIM MESMO é um truque para usar a mesma lógica
-                        // de limpeza que usamos quando recebemos do oponente.
                         NotificationCenter.default.post(name: NSNotification.Name("LocalRestart"), object: nil)
-                        
                     }) {
-                        Text("JOGAR NOVAMENTE")
-                            .font(.headline).fontWeight(.bold)
-                            .padding()
-                            .frame(width: 200)
-                            .background(Color.purple)
-                            .foregroundColor(.white)
-                            .cornerRadius(25)
-                            .shadow(radius: 10)
+                        Text("JOGAR NOVAMENTE").font(.headline).fontWeight(.bold).padding().frame(width: 200).background(Color.purple).foregroundColor(.white).cornerRadius(25).shadow(radius: 10)
                     }
-                }
-                .padding(40)
-                .background(Material.regular)
-                .cornerRadius(30)
-                .shadow(radius: 20)
-                .transition(.scale)
+                }.padding(40).background(Material.regular).cornerRadius(30).shadow(radius: 20).transition(.scale)
             }
         }
     }
