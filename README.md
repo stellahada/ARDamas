@@ -34,13 +34,13 @@ O projeto explora o poder do ecossistema Apple para criar uma experiência imers
 ## 📂 Estrutura do Projeto
 
 ```bash
-/CheckersAR
-  ├── App/              # Ciclo de vida da aplicação (SwiftUI App)
-  ├── Views/            # Telas e Componentes de Interface (Menus, HUD)
-  ├── AR/               # Lógica do ARView e RealityKit
-  ├── Network/          # Gerenciamento do Multipeer Connectivity
-  ├── Models/           # Lógica do jogo (Regras de Damas)
-  └── Assets.xcassets   # Modelos 3D (usdz), ícones e texturas
+/ARDamas
+  ├── App/              # Configuração inicial e ciclo de vida
+  ├── Models/           # Regras de negócio, Lógica das Peças e Tabuleiro
+  ├── ViewModels/       # Gerenciamento de estado (GameVM, ARSessionVM)
+  ├── Views/            # Telas e componentes visuais (SwiftUI)
+  ├── Services/         # Multipeer Connectivity e Gerenciadores de AR
+  └── Resources/        # Assets.xcassets (Modelos 3D .usdz, ícones)
 ```
 
 ---
