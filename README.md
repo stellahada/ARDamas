@@ -80,5 +80,7 @@ Pressione Cmd + R para compilar e rodar.
 
 ---
 
+## Contribuidores 🧑‍💻👩‍💻
+
 | [<img src="https://avatars.githubusercontent.com/u/151103690?v=4" width=115><br><sub>Henrique Leal</sub>](https://github.com/HenriLeal) | [<img src="https://avatars.githubusercontent.com/u/91349698?v=4" width=115><br><sub>Stella Hada</sub>](https://github.com/stellahada) | 
 | :---: | :---: | 
